@@ -18,6 +18,8 @@ from qis_engine.data.models import ContractSpec, Exchange, Sector, Settlement
 from qis_engine.data.store import DataStoreFactory
 from qis_engine.utils.calendars import nth_business_day_of_month
 
+STUBS_DIR = Path(__file__).parent.parent / "stubs"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,8 +66,18 @@ def _trending_store(tmp_path: Path, ticker: str, daily_return: float = 0.001) ->
     return store
 
 
+def _make_context(store):
+    from qis_engine.context.base import CalculationContext
+    from qis_engine.context.default import DataStoreMarketDataService, CSVReferenceDataService
+    from qis_engine.data.csv_stub import CSVStubProvider
+    return CalculationContext(
+        market_data=DataStoreMarketDataService(store),
+        reference_data=CSVReferenceDataService(CSVStubProvider(STUBS_DIR)),
+    )
+
+
 def _make_engine(
-    store, tickers: list[str], method: str = "equal", tmp_path: Path | None = None
+    store, tickers: list[str], method: str = "equal"
 ) -> IndexCalculationEngine:
     config = IndexConfig(
         name="TEST",
@@ -75,9 +87,10 @@ def _make_engine(
         rebalance_schedule=RebalanceSchedule.ANNUAL,
         weighting_method=method,
     )
+    context = _make_context(store)
     universe = CommodityUniverse([_spec(t) for t in tickers])
     weighting = WeightingEngine(method)
-    return IndexCalculationEngine(config, store, universe, weighting, roll_calendars={})
+    return IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +102,6 @@ class TestFlatPrices:
         store = _flat_store(tmp_path, ["A", "B"])
         engine = _make_engine(store, ["A", "B"])
         result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
-        # Skip first day (zero by definition), rest should be ~0
         non_zero = result.filter(pl.col("spot_return").abs() > 1e-10)
         assert len(non_zero) == 0, f"Expected all spot returns ≈ 0 for flat prices"
 
@@ -122,7 +134,6 @@ class TestTrendingPrices:
         store = _trending_store(tmp_path, "X", daily_return=dr)
         engine = _make_engine(store, ["X"])
         result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
-        # First row is day-2 (day-1 is init), so spot_return should ≈ dr
         spot_returns = result.filter(pl.col("spot_return") != 0.0)["spot_return"]
         assert all(abs(r - dr) < 1e-6 for r in spot_returns.to_list()), (
             f"Expected daily spot returns ≈ {dr}"
@@ -133,7 +144,7 @@ class TestTrendingPrices:
         store = _trending_store(tmp_path, "X", daily_return=dr)
         engine = _make_engine(store, ["X"])
         result = engine.run_calculation(date(2022, 1, 3), date(2022, 3, 31))
-        n = len(result) - 1  # exclude first init day
+        n = len(result) - 1
         expected_level = 100.0 * (1 + dr) ** n
         actual_level = float(result["excess_level"][-1])
         assert abs(actual_level - expected_level) / expected_level < 0.01

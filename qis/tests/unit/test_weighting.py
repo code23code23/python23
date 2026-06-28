@@ -29,10 +29,8 @@ def _specs(tickers=("CL", "GC", "ZC")) -> list[ContractSpec]:
 def _stub_store(tmp_path: Path, tickers=("CL", "GC", "ZC")) -> "DataStore":
     from qis_engine.utils.calendars import business_days_series
     store = DataStoreFactory.create_parquet(tmp_path)
-    rng_state = 42
-    import polars as pl
     import numpy as np
-    rng = np.random.default_rng(rng_state)
+    rng = np.random.default_rng(42)
     dates = business_days_series(date(2022, 1, 3), date(2023, 1, 3))
     for ticker in tickers:
         prices = 100 * np.cumprod(1 + rng.normal(0, 0.01, len(dates)))
@@ -49,48 +47,67 @@ def _stub_store(tmp_path: Path, tickers=("CL", "GC", "ZC")) -> "DataStore":
     return store
 
 
+def _stub_context(tmp_path: Path, tickers=("CL", "GC", "ZC")):
+    """Build a CalculationContext backed by an in-memory stub store."""
+    from qis_engine.context.base import CalculationContext
+    from qis_engine.context.default import DataStoreMarketDataService, CSVReferenceDataService
+    from qis_engine.data.csv_stub import CSVStubProvider
+
+    store = _stub_store(tmp_path, tickers)
+    stubs_dir = Path(__file__).parent.parent / "stubs"
+    provider = CSVStubProvider(stubs_dir)
+
+    return CalculationContext(
+        market_data=DataStoreMarketDataService(store),
+        reference_data=CSVReferenceDataService(provider),
+    )
+
+
 class TestEqualWeight:
     def test_equal_weights_sum_to_one(self, tmp_path):
-        store = _stub_store(tmp_path)
+        ctx = _stub_context(tmp_path)
         engine = WeightingEngine("equal")
-        w = engine.compute_weights(_specs(), date(2023, 1, 3), store)
+        w = engine.compute_weights(_specs(), date(2023, 1, 3), ctx)
         assert abs(w.sum() - 1.0) < 1e-9
 
     def test_equal_weights_are_uniform(self, tmp_path):
-        store = _stub_store(tmp_path)
+        ctx = _stub_context(tmp_path)
         engine = WeightingEngine("equal")
-        w = engine.compute_weights(_specs(), date(2023, 1, 3), store)
+        w = engine.compute_weights(_specs(), date(2023, 1, 3), ctx)
         vals = w.to_list()
         assert all(abs(v - vals[0]) < 1e-9 for v in vals)
 
     def test_single_ticker(self, tmp_path):
-        store = _stub_store(tmp_path, tickers=("CL",))
+        ctx = _stub_context(tmp_path, tickers=("CL",))
         engine = WeightingEngine("equal")
-        w = engine.compute_weights(_specs(("CL",)), date(2023, 1, 3), store)
+        w = engine.compute_weights(_specs(("CL",)), date(2023, 1, 3), ctx)
         assert abs(w[0] - 1.0) < 1e-9
 
 
 class TestRiskParityWeight:
     def test_weights_sum_to_one(self, tmp_path):
-        store = _stub_store(tmp_path)
+        ctx = _stub_context(tmp_path)
         engine = WeightingEngine("risk_parity")
-        w = engine.compute_weights(_specs(), date(2023, 1, 3), store)
+        w = engine.compute_weights(_specs(), date(2023, 1, 3), ctx)
         assert abs(w.sum() - 1.0) < 1e-6
 
     def test_all_weights_positive(self, tmp_path):
-        store = _stub_store(tmp_path)
+        ctx = _stub_context(tmp_path)
         engine = WeightingEngine("risk_parity")
-        w = engine.compute_weights(_specs(), date(2023, 1, 3), store)
+        w = engine.compute_weights(_specs(), date(2023, 1, 3), ctx)
         assert (w > 0).all()
 
     def test_higher_vol_gets_lower_weight(self, tmp_path):
         """Ticker with 2× vol should get roughly half the weight."""
         import numpy as np
-        store = DataStoreFactory.create_parquet(tmp_path)
+        from qis_engine.context.base import CalculationContext
+        from qis_engine.context.default import DataStoreMarketDataService, CSVReferenceDataService
+        from qis_engine.data.csv_stub import CSVStubProvider
         from qis_engine.utils.calendars import business_days_series
+
+        store = DataStoreFactory.create_parquet(tmp_path)
         rng = np.random.default_rng(0)
         dates = business_days_series(date(2022, 1, 3), date(2023, 1, 3))
-        # LOW_VOL: σ=1%, HIGH_VOL: σ=2%
         for ticker, vol in [("LV", 0.01), ("HV", 0.02)]:
             prices = 100 * np.cumprod(1 + rng.normal(0, vol, len(dates)))
             store.write_ohlcv(pl.DataFrame({
@@ -98,12 +115,18 @@ class TestRiskParityWeight:
                 "close": prices, "volume": [100_000] * len(dates),
                 "open_interest": [200_000] * len(dates),
             }), ticker)
+
+        stubs_dir = Path(__file__).parent.parent / "stubs"
+        ctx = CalculationContext(
+            market_data=DataStoreMarketDataService(store),
+            reference_data=CSVReferenceDataService(CSVStubProvider(stubs_dir)),
+        )
         specs = [
             ContractSpec("LV", "LV", Sector.ENERGY, Exchange.NYMEX, 1000, 0.01, "USD", Settlement.CASH),
             ContractSpec("HV", "HV", Sector.ENERGY, Exchange.NYMEX, 1000, 0.01, "USD", Settlement.CASH),
         ]
         engine = WeightingEngine("risk_parity")
-        w = engine.compute_weights(specs, date(2023, 1, 3), store)
+        w = engine.compute_weights(specs, date(2023, 1, 3), ctx)
         lv_w, hv_w = w.to_list()
         assert lv_w > hv_w, "Lower vol ticker should have higher risk-parity weight"
 
@@ -132,7 +155,7 @@ class TestConstraints:
         assert abs(w.sum() - 1.0) < 1e-9
 
     def test_empty_eligible_returns_empty_series(self, tmp_path):
-        store = _stub_store(tmp_path)
+        ctx = _stub_context(tmp_path)
         engine = WeightingEngine("equal")
-        w = engine.compute_weights([], date(2023, 1, 3), store)
+        w = engine.compute_weights([], date(2023, 1, 3), ctx)
         assert len(w) == 0

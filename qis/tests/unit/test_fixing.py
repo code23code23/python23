@@ -23,8 +23,11 @@ def _spec(t: str) -> ContractSpec:
 
 def _make_store_with_history(tmp_path: Path) -> tuple:
     """Returns (store, engine, workflow) with a 1-month price history for ticker A."""
-    from qis_engine.utils.calendars import business_days_series
+    from pathlib import Path as _Path
     import numpy as np
+    from qis_engine.context.base import CalculationContext
+    from qis_engine.context.default import DataStoreMarketDataService, CSVReferenceDataService
+    from qis_engine.data.csv_stub import CSVStubProvider
 
     store = DataStoreFactory.create_parquet(tmp_path)
     tickers = ["A"]
@@ -38,6 +41,11 @@ def _make_store_with_history(tmp_path: Path) -> tuple:
         "open_interest": [200_000] * len(dates),
     }), "A")
 
+    stubs_dir = _Path(__file__).parent.parent / "stubs"
+    context = CalculationContext(
+        market_data=DataStoreMarketDataService(store),
+        reference_data=CSVReferenceDataService(CSVStubProvider(stubs_dir)),
+    )
     config = IndexConfig(
         name="TEST",
         base_date=date(2023, 1, 2),
@@ -47,7 +55,7 @@ def _make_store_with_history(tmp_path: Path) -> tuple:
     )
     universe = CommodityUniverse([_spec("A")])
     weighting = WeightingEngine("equal")
-    engine = IndexCalculationEngine(config, store, universe, weighting, roll_calendars={})
+    engine = IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
 
     # Pre-populate index levels from historical run
     hist = engine.run_calculation(date(2023, 1, 2), date(2023, 1, 31))

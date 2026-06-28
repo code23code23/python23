@@ -5,7 +5,8 @@ from datetime import date
 
 import polars as pl
 
-from qis_engine.core.index import IndexConfig, ReturnType
+from qis_engine.context.base import CalculationContext
+from qis_engine.core.index import IndexConfig, ReturnType, BCOMIndex, GSCIIndex
 from qis_engine.core.roll import RollCalendar
 from qis_engine.core.universe import CommodityUniverse
 from qis_engine.core.weighting import WeightingConstraints, WeightingEngine
@@ -42,13 +43,13 @@ class IndexCalculationEngine:
     def __init__(
         self,
         config: IndexConfig,
-        store: "DataStore",  # noqa: F821
+        context: CalculationContext,
         universe: CommodityUniverse,
         weighting_engine: WeightingEngine,
         roll_calendars: dict[str, RollCalendar],
     ) -> None:
         self._config = config
-        self._store = store
+        self._context = context
         self._universe = universe
         self._weighting = weighting_engine
         self._roll_calendars = roll_calendars
@@ -61,33 +62,19 @@ class IndexCalculationEngine:
     def from_config(
         cls,
         config: IndexConfig,
-        store: "DataStore",  # noqa: F821
-        provider: "DataProviderBase | None" = None,  # noqa: F821
+        context: CalculationContext,
     ) -> "IndexCalculationEngine":
-        """Convenience factory: builds universe, weighting engine, and roll calendars."""
-        if provider is not None:
-            universe = CommodityUniverse.from_provider(provider)
-        else:
-            from qis_engine.data.models import ContractSpec, Sector, Exchange, Settlement
-            # Minimal fallback universe from config tickers if no provider given
-            specs = [
-                ContractSpec(ticker=t, name=t, sector=Sector.ENERGY,
-                             exchange=Exchange.NYMEX, lot_size=1000,
-                             tick_size=0.01, currency="USD", settlement=Settlement.CASH)
-                for t in config.tickers
-            ]
-            universe = CommodityUniverse(specs)
+        """Convenience factory: builds universe, weighting engine, and roll calendars from context."""
+        universe = CommodityUniverse.from_context(context)
+        weighting = WeightingEngine(config.weighting_method)
 
-        weighting = WeightingEngine(config.weighting_method, provider)
-
-        # Build roll calendars from store if available
+        schedule_df = context.reference_data.get_roll_schedule(config.name)
         roll_calendars: dict[str, RollCalendar] = {}
-        schedule_df = store.read_roll_schedule(config.name)
         if not schedule_df.is_empty():
             for ticker in config.tickers:
                 roll_calendars[ticker] = RollCalendar(ticker, schedule_df)
 
-        return cls(config, store, universe, weighting, roll_calendars)
+        return cls(config, context, universe, weighting, roll_calendars)
 
     def run_calculation(
         self,
@@ -114,7 +101,7 @@ class IndexCalculationEngine:
         # Prefetch all prices as date→close dicts for O(1) daily lookup
         price_lookup: dict[str, dict[date, float]] = {}
         for spec in eligible:
-            df = self._store.read_ohlcv(spec.ticker, start, end)
+            df = self._context.market_data.get_ohlcv(spec.ticker, start, end)
             if not df.is_empty():
                 price_lookup[spec.ticker] = dict(
                     zip(df["date"].to_list(), df["close"].to_list())
@@ -129,17 +116,15 @@ class IndexCalculationEngine:
         prev_prices: dict[str, float] = {}
 
         for i, dt in enumerate(bdays):
-            # Rebalance weights if needed (or on first day)
             if i == 0 or self._rebalancer.is_rebalance_day(dt):
                 w_series = self._weighting.compute_weights(
-                    eligible, dt, self._store, constraints
+                    eligible, dt, self._context, constraints
                 )
                 current_weights = dict(zip(
                     [s.ticker for s in eligible],
                     w_series.to_list(),
                 ))
 
-            # Get today's closes from pre-built dicts (O(1) per ticker)
             today_prices: dict[str, float] = {}
             for t in current_weights:
                 p = price_lookup.get(t, {}).get(dt)
@@ -147,7 +132,6 @@ class IndexCalculationEngine:
                     today_prices[t] = p
 
             if i == 0:
-                # Initialise prev prices, no return on first day
                 prev_prices = today_prices
                 records.append(self._zero_record(
                     dt, spot_level, excess_level, total_level, current_weights
@@ -215,7 +199,6 @@ class IndexCalculationEngine:
             delta_frac = schedule.daily_roll_fraction(dt)
             if delta_frac == 0.0:
                 continue
-            # Roll cost = front/deferred − 1
             front = today_prices.get(ticker)
             if front is None:
                 continue
@@ -245,3 +228,33 @@ class IndexCalculationEngine:
             "total_level": total_level,
             **{f"w_{t}": w for t, w in weights.items()},
         }
+
+
+# ------------------------------------------------------------------
+# Registry of known index configs
+# ------------------------------------------------------------------
+
+_CONFIG_REGISTRY: dict[str, IndexConfig] = {
+    "BCOM": BCOMIndex.default_config(),
+    "GSCI": GSCIIndex.default_config(),
+}
+
+
+def calculate(
+    index_name: str,
+    start: date,
+    end: date,
+    context: CalculationContext,
+    constraints: WeightingConstraints | None = None,
+) -> pl.DataFrame:
+    """
+    Stateless entry point — the servlet service() method.
+
+    Builds a fresh IndexCalculationEngine from the context on every call.
+    All calculation state lives only on this call's stack.
+    """
+    config = _CONFIG_REGISTRY.get(index_name)
+    if config is None:
+        raise ValueError(f"Unknown index: {index_name!r}. Available: {list(_CONFIG_REGISTRY)}")
+    engine = IndexCalculationEngine.from_config(config, context)
+    return engine.run_calculation(start, end, constraints)

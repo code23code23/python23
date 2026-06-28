@@ -22,17 +22,12 @@ class WeightingEngine:
     All methods return a pl.Series indexed by ticker with weights summing to 1.0.
     """
 
-    def __init__(
-        self,
-        method: str,
-        provider: "DataProviderBase | None" = None,  # noqa: F821
-    ) -> None:
+    def __init__(self, method: str) -> None:
         self._method = method
-        self._provider = provider
         self._strategies: dict[str, "_WeightingStrategy"] = {
             "equal": _EqualWeight(),
-            "production": _ProductionWeight(provider),
-            "liquidity": _LiquidityWeight(provider),
+            "production": _ProductionWeight(),
+            "liquidity": _LiquidityWeight(),
             "risk_parity": _RiskParity(),
         }
 
@@ -40,14 +35,14 @@ class WeightingEngine:
         self,
         eligible: list[ContractSpec],
         as_of: date,
-        store: "DataStore",  # noqa: F821
+        context: "CalculationContext",  # noqa: F821
         constraints: WeightingConstraints | None = None,
     ) -> pl.Series:
         if not eligible:
             return pl.Series("weight", [], dtype=pl.Float64)
         constraints = constraints or WeightingConstraints()
         strategy = self._strategies[self._method]
-        weights = strategy.compute(eligible, as_of, store)
+        weights = strategy.compute(eligible, as_of, context)
         return _apply_constraints(weights, eligible, constraints)
 
 
@@ -60,13 +55,13 @@ class _WeightingStrategy:
         self,
         eligible: list[ContractSpec],
         as_of: date,
-        store: "DataStore",  # noqa: F821
+        context: "CalculationContext",  # noqa: F821
     ) -> dict[str, float]:
         raise NotImplementedError
 
 
 class _EqualWeight(_WeightingStrategy):
-    def compute(self, eligible, as_of, store):
+    def compute(self, eligible, as_of, context):
         n = len(eligible)
         return {s.ticker: 1.0 / n for s in eligible}
 
@@ -74,20 +69,10 @@ class _EqualWeight(_WeightingStrategy):
 class _ProductionWeight(_WeightingStrategy):
     """GSCI-style: weights proportional to world production averages."""
 
-    def __init__(self, provider) -> None:
-        self._provider = provider
-        self._weights_df: pl.DataFrame | None = None
-
-    def _load(self) -> pl.DataFrame:
-        if self._weights_df is None and self._provider is not None:
-            self._weights_df = self._provider.get_production_weights()
-        return self._weights_df if self._weights_df is not None else pl.DataFrame()
-
-    def compute(self, eligible, as_of, store):
-        df = self._load()
+    def compute(self, eligible, as_of, context):
+        df = context.reference_data.get_production_weights()
         tickers = {s.ticker for s in eligible}
         if df.is_empty():
-            # fallback to equal weight if no production data
             n = len(eligible)
             return {s.ticker: 1.0 / n for s in eligible}
 
@@ -96,7 +81,6 @@ class _ProductionWeight(_WeightingStrategy):
             (pl.col("year") == year) & (pl.col("ticker").is_in(list(tickers)))
         )
         if subset.is_empty():
-            # try previous years
             subset = df.filter(pl.col("ticker").is_in(list(tickers))).sort("year").tail(
                 len(tickers) * 5
             )
@@ -114,19 +98,17 @@ class _LiquidityWeight(_WeightingStrategy):
     Liquidity proxy = average daily volume × close price (dollar volume) over lookback.
     """
 
-    def __init__(self, provider) -> None:
-        self._production = _ProductionWeight(provider)
-        self._lookback_days = 252  # 1 year of daily volume data
+    def __init__(self, lookback_days: int = 252) -> None:
+        self._production = _ProductionWeight()
+        self._lookback_days = lookback_days
 
-    def compute(self, eligible, as_of, store):
-        from datetime import timedelta
-        prod_w = self._production.compute(eligible, as_of, store)
+    def compute(self, eligible, as_of, context):
+        prod_w = self._production.compute(eligible, as_of, context)
 
-        # Liquidity weight from dollar volume
         liq: dict[str, float] = {}
         lookback_start = date(as_of.year - 1, as_of.month, as_of.day)
         for spec in eligible:
-            df = store.read_ohlcv(spec.ticker, lookback_start, as_of)
+            df = context.market_data.get_ohlcv(spec.ticker, lookback_start, as_of)
             if df.is_empty():
                 liq[spec.ticker] = 0.0
             else:
@@ -136,7 +118,6 @@ class _LiquidityWeight(_WeightingStrategy):
         total_liq = sum(liq.values()) or 1.0
         liq_w = {t: v / total_liq for t, v in liq.items()}
 
-        # Blend: 1/3 production + 2/3 liquidity
         tickers = [s.ticker for s in eligible]
         blended: dict[str, float] = {}
         for t in tickers:
@@ -155,13 +136,12 @@ class _RiskParity(_WeightingStrategy):
     def __init__(self, lookback_days: int = 252) -> None:
         self._lookback = lookback_days
 
-    def compute(self, eligible, as_of, store):
-        from datetime import timedelta
+    def compute(self, eligible, as_of, context):
         import math
         start = date(as_of.year - 1, as_of.month, as_of.day)
         inv_vol: dict[str, float] = {}
         for spec in eligible:
-            df = store.read_ohlcv(spec.ticker, start, as_of)
+            df = context.market_data.get_ohlcv(spec.ticker, start, as_of)
             if len(df) < 5:
                 inv_vol[spec.ticker] = 0.0
                 continue
@@ -184,7 +164,6 @@ def _apply_constraints(
 ) -> pl.Series:
     tickers = [s.ticker for s in eligible]
     weights = {t: raw.get(t, 0.0) for t in tickers}
-    # Iterative clip-and-renormalize until all weights satisfy bounds
     for _ in range(50):
         weights = {t: max(c.min_weight, min(c.max_weight, w)) for t, w in weights.items()}
         total = sum(weights.values()) or 1.0

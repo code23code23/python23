@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import tempfile
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -12,34 +11,20 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from qis_engine.calculation.engine import IndexCalculationEngine
-from qis_engine.core.index import BCOMIndex, GSCIIndex
-from qis_engine.data.csv_stub import CSVStubProvider
-from qis_engine.data.store import DataStoreFactory
+from qis_engine.calculation.engine import calculate
+from qis_engine.context.default import build_default_context
 
 STUBS_DIR = Path(__file__).parents[1] / "tests" / "stubs"
 STATIC_DIR = Path(__file__).parent / "static"
 
-_store: Any = None
-_engines: dict[str, IndexCalculationEngine] = {}
+# Application-scoped context — stateless service handles, safe to share across requests
+_context: Any = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _store, _engines
-    root = Path(tempfile.mkdtemp())
-    provider = CSVStubProvider(STUBS_DIR)
-    _store = DataStoreFactory.create_parquet(root)
-    provider.load_all(_store)
-
-    roll_df = provider.get_roll_schedule()
-    _store.write_roll_schedule(roll_df, "BCOM")
-    _store.write_roll_schedule(roll_df, "GSCI")
-
-    for factory in (BCOMIndex.default_config, GSCIIndex.default_config):
-        cfg = factory()
-        _engines[cfg.name] = IndexCalculationEngine.from_config(cfg, _store, provider)
-
+    global _context
+    _context = build_default_context(STUBS_DIR)
     yield
 
 
@@ -59,15 +44,21 @@ def index():
 
 
 @app.post("/api/calculate")
-def calculate(req: CalcRequest):
+def calculate_endpoint(req: CalcRequest):
+    """
+    Servlet service() equivalent — stateless per-request handler.
+
+    Each call builds a fresh IndexCalculationEngine from the shared context.
+    All calculation state lives only on this call's stack.
+    """
     if req.end < req.start:
         raise HTTPException(status_code=400, detail="end date must be on or after start date")
 
-    engine = _engines.get(req.index)
-    if engine is None:
-        raise HTTPException(status_code=400, detail=f"Unknown index: {req.index}")
+    try:
+        df = calculate(req.index, req.start, req.end, _context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    df = engine.run_calculation(req.start, req.end)
     if df.is_empty():
         raise HTTPException(
             status_code=400,

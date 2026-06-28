@@ -11,6 +11,7 @@ from qis_engine.api.routers import indices, futures, options
 # Module-level singletons injected at startup
 _store: Any = None
 _engines: dict[str, Any] = {}
+_context: Any = None
 
 
 def get_app_store():
@@ -23,24 +24,24 @@ def get_app_engines():
     return _engines
 
 
+def get_app_context():
+    if _context is None:
+        raise RuntimeError("CalculationContext not initialised — call init_app() before serving")
+    return _context
+
+
 def create_app(
     store: Any | None = None,
     engines: dict[str, Any] | None = None,
+    context: Any | None = None,
 ) -> FastAPI:
-    """
-    Factory for the FastAPI application.
-
-    Args:
-        store:   DataStore instance to use for all requests. If None the app
-                 will raise at runtime when store access is attempted.
-        engines: dict mapping index name → IndexCalculationEngine, used by
-                 the backtest endpoint.
-    """
-    global _store, _engines
+    global _store, _engines, _context
     if store is not None:
         _store = store
     if engines is not None:
         _engines = engines
+    if context is not None:
+        _context = context
 
     app = FastAPI(
         title="QIS Index Engine",
@@ -67,9 +68,10 @@ def init_app(
 ) -> FastAPI:
     """
     Convenience initialiser for development: loads CSV stubs into a
-    temporary Parquet store and wires up BCOM + GSCI engines.
+    temporary Parquet store and wires up BCOM + GSCI engines via CalculationContext.
     """
     import tempfile
+    from qis_engine.context.default import build_default_context
     from qis_engine.data.csv_stub import CSVStubProvider
     from qis_engine.data.store import DataStoreFactory
     from qis_engine.core.index import BCOMIndex, GSCIIndex
@@ -86,13 +88,14 @@ def init_app(
     store.write_roll_schedule(roll_df, "BCOM")
     store.write_roll_schedule(roll_df, "GSCI")
 
+    context = build_default_context(stubs, store)
+
     engines = {}
     for config_factory in (BCOMIndex.default_config, GSCIIndex.default_config):
         cfg = config_factory()
-        eng = IndexCalculationEngine.from_config(cfg, store, provider)
-        engines[cfg.name] = eng
+        engines[cfg.name] = IndexCalculationEngine.from_config(cfg, context)
 
-    return create_app(store=store, engines=engines)
+    return create_app(store=store, engines=engines, context=context)
 
 
 # Convenience: `uvicorn qis_engine.api.app:app` in dev with stubs

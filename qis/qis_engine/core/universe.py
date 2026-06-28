@@ -17,8 +17,8 @@ class CommodityUniverse:
         self._specs: dict[str, ContractSpec] = {s.ticker: s for s in specs}
 
     @classmethod
-    def from_provider(cls, provider: "DataProviderBase") -> "CommodityUniverse":  # noqa: F821
-        return cls(provider.get_contract_specs())
+    def from_context(cls, context: "CalculationContext") -> "CommodityUniverse":  # noqa: F821
+        return cls(context.reference_data.get_contract_specs())
 
     def get_all(self) -> list[ContractSpec]:
         return list(self._specs.values())
@@ -31,12 +31,12 @@ class CommodityUniverse:
         as_of: date,
         tickers: list[str] | None = None,
         min_history_days: int = 0,
-        store: "DataStore | None" = None,  # noqa: F821
+        context: "CalculationContext | None" = None,  # noqa: F821
     ) -> list[ContractSpec]:
         """
         Return constituents eligible on `as_of`.
         If `tickers` is provided, restrict to that subset.
-        If `store` and `min_history_days` provided, filter out tickers
+        If `context` and `min_history_days` provided, filter out tickers
         with insufficient history.
         """
         candidates = (
@@ -44,14 +44,16 @@ class CommodityUniverse:
             if tickers
             else self.get_all()
         )
-        if store is None or min_history_days == 0:
+        if context is None or min_history_days == 0:
             return candidates
 
         eligible = []
         for spec in candidates:
-            ohlcv = store.read_ohlcv(spec.ticker,
-                                      date(as_of.year - 5, as_of.month, as_of.day),
-                                      as_of)
+            ohlcv = context.market_data.get_ohlcv(
+                spec.ticker,
+                date(as_of.year - 5, as_of.month, as_of.day),
+                as_of,
+            )
             if len(ohlcv) >= min_history_days:
                 eligible.append(spec)
         return eligible

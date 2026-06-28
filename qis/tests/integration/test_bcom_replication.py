@@ -1,6 +1,6 @@
 """
 Integration test: full BCOM-style index calculation from CSV stub data.
-Validates the end-to-end pipeline: CSVStubProvider → DataStore → IndexCalculationEngine.
+Validates the end-to-end pipeline: CalculationContext → IndexCalculationEngine.
 """
 from __future__ import annotations
 
@@ -14,34 +14,18 @@ STUBS_DIR = Path(__file__).parent.parent / "stubs"
 
 
 @pytest.fixture(scope="module")
-def store(tmp_path_factory):
-    from qis_engine.data.csv_stub import CSVStubProvider
-    from qis_engine.data.store import DataStoreFactory
-
+def context(tmp_path_factory):
+    from qis_engine.context.default import build_default_context
     root = tmp_path_factory.mktemp("store")
-    provider = CSVStubProvider(STUBS_DIR)
-    s = DataStoreFactory.create_parquet(root)
-    provider.load_all(s)
-
-    # Also write roll schedule to store for engine use
-    roll_df = provider.get_roll_schedule()
-    s.write_roll_schedule(roll_df, "BCOM")
-    s.write_roll_schedule(roll_df, "GSCI")
-    return s
+    return build_default_context(STUBS_DIR)
 
 
 @pytest.fixture(scope="module")
-def provider():
-    from qis_engine.data.csv_stub import CSVStubProvider
-    return CSVStubProvider(STUBS_DIR)
-
-
-@pytest.fixture(scope="module")
-def bcom_engine(store, provider):
+def bcom_engine(context):
     from qis_engine.calculation.engine import IndexCalculationEngine
     from qis_engine.core.index import BCOMIndex
     config = BCOMIndex.default_config()
-    return IndexCalculationEngine.from_config(config, store, provider)
+    return IndexCalculationEngine.from_config(config, context)
 
 
 class TestCSVStubLoading:
@@ -57,20 +41,20 @@ class TestCSVStubLoading:
         for fname in ("contract_specs.csv", "roll_schedule.csv", "production_weights.csv"):
             assert (STUBS_DIR / "reference" / fname).exists()
 
-    def test_ohlcv_rows_non_empty(self, store):
-        df = store.read_ohlcv("CL", date(2015, 1, 1), date(2020, 12, 31))
+    def test_ohlcv_rows_non_empty(self, context):
+        df = context.market_data.get_ohlcv("CL", date(2015, 1, 1), date(2020, 12, 31))
         assert len(df) > 1000, "Expected 5+ years of daily CL data"
 
-    def test_ohlcv_has_required_columns(self, store):
-        df = store.read_ohlcv("GC", date(2020, 1, 1), date(2020, 12, 31))
+    def test_ohlcv_has_required_columns(self, context):
+        df = context.market_data.get_ohlcv("GC", date(2020, 1, 1), date(2020, 12, 31))
         assert set(df.columns) >= {"date", "open", "high", "low", "close", "volume", "open_interest"}
 
-    def test_close_prices_positive(self, store):
-        df = store.read_ohlcv("CL", date(2010, 1, 1), date(2024, 12, 31))
+    def test_close_prices_positive(self, context):
+        df = context.market_data.get_ohlcv("CL", date(2010, 1, 1), date(2024, 12, 31))
         assert (df["close"] > 0).all()
 
-    def test_contract_specs_loaded(self, provider):
-        specs = provider.get_contract_specs()
+    def test_contract_specs_loaded(self, context):
+        specs = context.reference_data.get_contract_specs()
         tickers = [s.ticker for s in specs]
         for t in ("CL", "GC", "NG", "HG", "ZC", "ZW", "LC"):
             assert t in tickers

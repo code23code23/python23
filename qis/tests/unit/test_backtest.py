@@ -30,6 +30,11 @@ def _spec(t: str) -> ContractSpec:
 
 def _make_engine_and_store(tmp_path: Path, tickers=("A", "B"), daily_return=0.001):
     import numpy as np
+    from pathlib import Path as _Path
+    from qis_engine.context.base import CalculationContext
+    from qis_engine.context.default import DataStoreMarketDataService, CSVReferenceDataService
+    from qis_engine.data.csv_stub import CSVStubProvider
+
     store = DataStoreFactory.create_parquet(tmp_path)
     dates = business_days_series(date(2022, 1, 3), date(2023, 12, 30))
     rng = np.random.default_rng(7)
@@ -41,6 +46,12 @@ def _make_engine_and_store(tmp_path: Path, tickers=("A", "B"), daily_return=0.00
             "volume": [100_000] * len(dates),
             "open_interest": [200_000] * len(dates),
         }), t)
+
+    stubs_dir = _Path(__file__).parent.parent / "stubs"
+    context = CalculationContext(
+        market_data=DataStoreMarketDataService(store),
+        reference_data=CSVReferenceDataService(CSVStubProvider(stubs_dir)),
+    )
     config = IndexConfig(
         name="TEST",
         base_date=date(2022, 1, 3),
@@ -50,7 +61,7 @@ def _make_engine_and_store(tmp_path: Path, tickers=("A", "B"), daily_return=0.00
     )
     universe = CommodityUniverse([_spec(t) for t in tickers])
     weighting = WeightingEngine("equal")
-    engine = IndexCalculationEngine(config, store, universe, weighting, roll_calendars={})
+    engine = IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
     return engine, store
 
 
