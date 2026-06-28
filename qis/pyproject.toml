@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qis-engine"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "polars>=1.0.0",
+    "pyarrow>=14.0.0",
+    "scipy>=1.13.0",
+    "exchange-calendars>=4.2.4",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+    "apscheduler>=3.10.0",
+    "structlog>=24.1.0",
+]
+
+[project.optional-dependencies]
+prod = ["arcticdb>=4.0.0"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+    "freezegun>=1.5.0",
+    "hypothesis>=6.100.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["qis_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
