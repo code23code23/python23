@@ -5,8 +5,9 @@ from datetime import date
 
 import polars as pl
 
+from qis_engine.calculation.calculator import Calculator
 from qis_engine.context.base import CalculationContext
-from qis_engine.core.index import IndexConfig, ReturnType, BCOMIndex, GSCIIndex
+from qis_engine.core.index import IndexConfig, ReturnType
 from qis_engine.core.roll import RollCalendar
 from qis_engine.core.universe import CommodityUniverse
 from qis_engine.core.weighting import WeightingConstraints, WeightingEngine
@@ -231,30 +232,39 @@ class IndexCalculationEngine:
 
 
 # ------------------------------------------------------------------
-# Registry of known index configs
+# Application-scoped calculator registry
 # ------------------------------------------------------------------
 
-_CONFIG_REGISTRY: dict[str, IndexConfig] = {
-    "BCOM": BCOMIndex.default_config(),
-    "GSCI": GSCIIndex.default_config(),
-}
+_CALCULATOR_REGISTRY: dict[str, Calculator] = {}
+
+
+def init_calculators(context: CalculationContext) -> None:
+    """
+    Build one Calculator instance per index and store them for the process lifetime.
+    Call once at server startup (lifespan / init_app) before serving requests.
+    """
+    from qis_engine.calculation.strategy.bcom import BCOMCalculator
+    from qis_engine.calculation.strategy.gsci import GSCICalculator
+    _CALCULATOR_REGISTRY["BCOM"] = BCOMCalculator(context)
+    _CALCULATOR_REGISTRY["GSCI"] = GSCICalculator(context)
 
 
 def calculate(
     index_name: str,
     start: date,
     end: date,
-    context: CalculationContext,
     constraints: WeightingConstraints | None = None,
 ) -> pl.DataFrame:
     """
-    Stateless entry point — the servlet service() method.
+    Entry point — the servlet service() method.
 
-    Builds a fresh IndexCalculationEngine from the context on every call.
-    All calculation state lives only on this call's stack.
+    Delegates to the application-scoped Calculator singleton for the given index.
+    Context is owned by the Calculator; callers do not pass it here.
     """
-    config = _CONFIG_REGISTRY.get(index_name)
-    if config is None:
-        raise ValueError(f"Unknown index: {index_name!r}. Available: {list(_CONFIG_REGISTRY)}")
-    engine = IndexCalculationEngine.from_config(config, context)
-    return engine.run_calculation(start, end, constraints)
+    calculator = _CALCULATOR_REGISTRY.get(index_name)
+    if calculator is None:
+        raise ValueError(
+            f"Unknown index: {index_name!r}. Available: {list(_CALCULATOR_REGISTRY)}"
+            + (" (init_calculators() not yet called)" if not _CALCULATOR_REGISTRY else "")
+        )
+    return calculator.calculate(start, end, constraints)

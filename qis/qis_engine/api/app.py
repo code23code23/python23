@@ -10,7 +10,6 @@ from qis_engine.api.routers import indices, futures, options
 
 # Module-level singletons injected at startup
 _store: Any = None
-_engines: dict[str, Any] = {}
 _context: Any = None
 
 
@@ -18,10 +17,6 @@ def get_app_store():
     if _store is None:
         raise RuntimeError("DataStore not initialised — call init_app() before serving")
     return _store
-
-
-def get_app_engines():
-    return _engines
 
 
 def get_app_context():
@@ -32,14 +27,11 @@ def get_app_context():
 
 def create_app(
     store: Any | None = None,
-    engines: dict[str, Any] | None = None,
     context: Any | None = None,
 ) -> FastAPI:
-    global _store, _engines, _context
+    global _store, _context
     if store is not None:
         _store = store
-    if engines is not None:
-        _engines = engines
     if context is not None:
         _context = context
 
@@ -68,14 +60,13 @@ def init_app(
 ) -> FastAPI:
     """
     Convenience initialiser for development: loads CSV stubs into a
-    temporary Parquet store and wires up BCOM + GSCI engines via CalculationContext.
+    temporary Parquet store and wires up BCOM + GSCI Calculator singletons.
     """
     import tempfile
     from qis_engine.context.default import build_default_context
     from qis_engine.data.csv_stub import CSVStubProvider
     from qis_engine.data.store import DataStoreFactory
-    from qis_engine.core.index import BCOMIndex, GSCIIndex
-    from qis_engine.calculation.engine import IndexCalculationEngine
+    from qis_engine.calculation.engine import init_calculators
 
     root = Path(store_root) if store_root else Path(tempfile.mkdtemp())
     stubs = Path(stubs_dir) if stubs_dir else Path(__file__).parents[2] / "tests" / "stubs"
@@ -89,13 +80,9 @@ def init_app(
     store.write_roll_schedule(roll_df, "GSCI")
 
     context = build_default_context(stubs, store)
+    init_calculators(context)
 
-    engines = {}
-    for config_factory in (BCOMIndex.default_config, GSCIIndex.default_config):
-        cfg = config_factory()
-        engines[cfg.name] = IndexCalculationEngine.from_config(cfg, context)
-
-    return create_app(store=store, engines=engines, context=context)
+    return create_app(store=store, context=context)
 
 
 # Convenience: `uvicorn qis_engine.api.app:app` in dev with stubs

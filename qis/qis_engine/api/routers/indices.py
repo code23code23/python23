@@ -18,16 +18,16 @@ def get_store():
     return get_app_store()
 
 
-def get_engines():
-    """Dependency: returns the engines dict injected at app startup."""
-    from qis_engine.api.app import get_app_engines
-    return get_app_engines()
+def get_calculator_registry():
+    """Dependency: returns the application-scoped Calculator registry."""
+    from qis_engine.calculation.engine import _CALCULATOR_REGISTRY
+    return _CALCULATOR_REGISTRY
 
 
 @router.get("/")
-def list_indices(engines=Depends(get_engines)) -> list[str]:
+def list_indices(registry=Depends(get_calculator_registry)) -> list[str]:
     """List available index names."""
-    return list(engines.keys())
+    return list(registry.keys())
 
 
 @router.get("/{index_name}/level", response_model=list[IndexLevelRow])
@@ -78,15 +78,19 @@ def get_roll_schedule(
 def run_backtest(
     index_name: str,
     req: BacktestRequest,
-    engines=Depends(get_engines),
+    registry=Depends(get_calculator_registry),
     store=Depends(get_store),
 ) -> RiskSummaryResponse:
     from qis_engine.backtest.costs import CommissionModel, SlippageModel, TransactionCostModel
     from qis_engine.backtest.simulator import VectorizedSimulator
+    from qis_engine.calculation.engine import IndexCalculationEngine
 
-    engine = engines.get(index_name)
-    if engine is None:
+    calculator = registry.get(index_name)
+    if calculator is None:
         raise HTTPException(status_code=404, detail=f"Index '{index_name}' not configured")
+
+    # Build an IndexCalculationEngine from the Calculator's owned config and context
+    engine = IndexCalculationEngine.from_config(calculator._config, calculator._context)
 
     cost_model = TransactionCostModel(
         commission=CommissionModel(req.commission_bps),
