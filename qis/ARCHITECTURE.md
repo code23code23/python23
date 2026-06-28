@@ -11,25 +11,26 @@ The design is modelled on the Java Servlet architecture:
 - **Container** — the FastAPI/uvicorn process started inside a Docker container
 - **CalculationContext** — analogous to `ServletContext`; an application-scoped, immutable
   service provider created once at startup and shared safely across all concurrent requests
+- **`Calculator` subclasses** — analogous to `HttpServlet`; one singleton per index, holding
+  the context and all engine components, built once by `init_calculators(context)` at startup
 - **`calculate()`** — the module-level entry point in `engine.py`, analogous to a Servlet's
-  `service()` method; builds a fresh `IndexCalculationEngine` on every call so all state
-  lives on the call stack
+  `service()` method; dispatches to the pre-built `Calculator` singleton for the given index
 
-The core calculation loop is:
+The core flow is:
 
 ```
-CalculationContext
+Server startup (lifespan)
+  build_default_context(stubs_dir) → CalculationContext (singleton)
+  init_calculators(context)        → BCOMCalculator, GSCICalculator (singletons)
+
+Per request
+  calculate(index_name, start, end)
        │
-       ├── MarketDataService  ──► get_ohlcv(), get_options_chain()
-       └── ReferenceDataService ► get_contract_specs(), get_roll_schedule(), get_production_weights()
-               │
-               ▼
-  calculate(index_name, start, end, context)   ← stateless entry point
-       │
-       └─► IndexCalculationEngine.from_config(config, context)
-                   │
+       └─► _CALCULATOR_REGISTRY[index_name].calculate(start, end)
+                   │  (uses self._context, self._universe,
+                   │   self._weighting, self._roll_calendars, self._rebalancer)
                    ▼
-           run_calculation(start, end)
+           pl.DataFrame (date, *_return, *_level, w_<ticker>…)
                    │
                    ▼
            VectorizedSimulator → BacktestResult
@@ -44,29 +45,36 @@ qis/
 ├── Dockerfile              # python:3.11-slim; polars-lts-cpu; uvicorn on :8080
 ├── .dockerignore
 ├── qis_engine/
-│   ├── context/        # CalculationContext service provider (NEW)
-│   │   ├── base.py     #   CalculationContext dataclass + MarketDataService/ReferenceDataService ABCs
-│   │   └── default.py  #   DataStoreMarketDataService, CSVReferenceDataService, build_default_context()
-│   ├── core/           # Domain model: config, universe, weighting, roll, rebalancing
-│   ├── data/           # I/O abstractions: DataStore, schemas, CSV stubs
-│   ├── futures/        # Contract and chain representations, roll cost
-│   ├── options/        # Black-76 pricing, greeks, option strategies
-│   ├── calculation/    # Index calculation engine, rebalancer, fixing
-│   ├── backtest/       # Vectorized simulator, transaction costs, risk metrics
-│   ├── api/            # FastAPI routers
-│   └── utils/          # Business-day calendars, structured logging
-├── qis_engine_ui/      # Standalone FastAPI server + single-page HTML frontend
+│   ├── context/            # CalculationContext service provider
+│   │   ├── base.py         #   CalculationContext dataclass + MarketDataService/ReferenceDataService ABCs
+│   │   └── default.py      #   DataStoreMarketDataService, CSVReferenceDataService, build_default_context()
+│   ├── core/               # Domain model: config, universe, weighting, roll, rebalancing
+│   ├── data/               # I/O abstractions: DataStore, schemas, CSV stubs
+│   ├── futures/            # Contract and chain representations, roll cost
+│   ├── options/            # Black-76 pricing, greeks, option strategies
+│   ├── calculation/        # Calculator base, per-index strategies, engine, rebalancer, fixing
+│   │   ├── calculator.py   #   Calculator ABC + shared daily loop (_run_calculation)
+│   │   ├── strategy/       #   Per-index Calculator implementations
+│   │   │   ├── bcom.py     #     BCOMCalculator
+│   │   │   └── gsci.py     #     GSCICalculator
+│   │   ├── engine.py       #   IndexCalculationEngine; init_calculators(); calculate()
+│   │   ├── rebalancer.py   #   RebalancingEngine
+│   │   └── fixing.py       #   IndexFixingWorkflow
+│   ├── backtest/           # Vectorized simulator, transaction costs, risk metrics
+│   ├── api/                # FastAPI routers
+│   └── utils/              # Business-day calendars, structured logging
+├── qis_engine_ui/          # Standalone FastAPI server + single-page HTML frontend
 └── tests/
-    ├── unit/           # Fast, isolated tests with stub data
-    ├── integration/    # Full calculation pipeline (e.g. BCOM replication)
-    └── stubs/          # CSV reference data and OHLCV fixtures
+    ├── unit/               # Fast, isolated tests with stub data
+    ├── integration/        # Full calculation pipeline (e.g. BCOM replication)
+    └── stubs/              # CSV reference data and OHLCV fixtures
 ```
 
 ---
 
 ## Layer responsibilities
 
-### `context/` _(new)_
+### `context/`
 
 The service-provider layer that decouples calculation logic from data infrastructure.
 
@@ -84,9 +92,9 @@ Owns the domain model with no I/O.
 
 | Module | Responsibility |
 |--------|---------------|
-| `index.py` | `IndexConfig` dataclass; `ReturnType` / `RebalanceSchedule` enums; pre-built `BCOMIndex` / `GSCIIndex` factories |
-| `universe.py` | `CommodityUniverse` — filters the eligible constituent set by date and history length; constructed via `from_context(context)` |
-| `weighting.py` | `WeightingEngine` — dispatches to strategy objects; `WeightingConstraints` with clip-and-renormalize; each strategy receives `context` at `compute_weights()` call time |
+| `index.py` | `IndexConfig` dataclass; `ReturnType` / `RebalanceSchedule` enums; `BCOMIndex` / `GSCIIndex` config factories used by the concrete `Calculator` subclasses |
+| `universe.py` | `CommodityUniverse` — filters the eligible constituent set; constructed via `from_context(context)` |
+| `weighting.py` | `WeightingEngine` — dispatches to strategy objects; `WeightingConstraints` with clip-and-renormalize; context passed at `compute_weights()` call time |
 | `roll.py` | `RollCalendar`, `RollSchedule`; `OIRollFinder`, `MomentumRollFinder` — alternative roll-date algorithms |
 
 ### `data/`
@@ -99,27 +107,14 @@ Low-level I/O building blocks used by the `context/` layer.
 | `models.py` | `ContractSpec` (frozen dataclass); `Sector`, `Exchange`, `Settlement` enums; `OHLCV_SCHEMA` / `OPTIONS_CHAIN_SCHEMA` constants |
 | `csv_stub.py` | `CSVStubProvider` — reads local CSV fixtures; used in tests and the default context |
 
-### `futures/`
-
-| Module | Responsibility |
-|--------|---------------|
-| `contract.py` | `FuturesContract`, `ContractMonth` value types |
-| `chain.py` | `FuturesChain` — ratio-adjusted continuous series; approximated deferred pricing |
-| `roll_cost.py` | `RollCostCalculator` — per-ticker contango constants |
-
-### `options/`
-
-| Module | Responsibility |
-|--------|---------------|
-| `pricing.py` | `Black76Pricer` — wraps `optlib.gbs` for European / American commodity options; `OptionPrice` frozen dataclass |
-| `greeks.py` | `GreeksCalculator` — analytical greeks + vanna/volga via central finite differences |
-| `strategies.py` | Option strategy builders (straddles, collars, etc.) |
-
 ### `calculation/`
 
 | Module | Responsibility |
 |--------|---------------|
-| `engine.py` | `IndexCalculationEngine` — main daily calculation loop; `from_config(config, context)` factory; module-level `calculate()` stateless entry point; `_CONFIG_REGISTRY` mapping index names to configs |
+| `calculator.py` | `Calculator` ABC — `__init__(context)` stores the context; abstract `calculate(start, end, constraints)`; concrete `_run_calculation(...)` containing the full shared daily loop; `_compute_roll_return` and `_zero_record` helpers |
+| `strategy/bcom.py` | `BCOMCalculator(Calculator)` — owns BCOM config, universe, weighting engine, roll calendars, rebalancer; all built once in `__init__(context)`; `calculate()` calls `_run_calculation` |
+| `strategy/gsci.py` | `GSCICalculator(Calculator)` — same pattern for GSCI |
+| `engine.py` | `IndexCalculationEngine` (used by fixing, backtest, and tests directly); `_CALCULATOR_REGISTRY` dict; `init_calculators(context)` populates it at startup; module-level `calculate()` dispatches to the registry |
 | `rebalancer.py` | `RebalancingEngine` — determines rebalance dates for annual, monthly, and quarterly schedules |
 | `fixing.py` | `IndexFixingWorkflow` — handles official index fixing and publication |
 
@@ -136,45 +131,48 @@ Low-level I/O building blocks used by the `context/` layer.
 ## Data flow
 
 ```
-CSVStubProvider (or any ReferenceDataService impl)
+Server startup:
+  build_default_context(stubs_dir)
         │
-        │  get_contract_specs()
-        │  get_roll_schedule(index_name)
-        │  get_production_weights()
-        ▼
-DataStore (via DataStoreMarketDataService)
-        │
-        │  get_ohlcv(ticker, start, end)
-        ▼
-CalculationContext  ──────────────────────────────────────────┐
-        │                                                      │ (application-scoped,
-        │  calculate(index_name, start, end, context)          │  shared across requests)
-        ▼                                                      │
-IndexCalculationEngine.from_config(config, context)           │
-        │  • CommodityUniverse.from_context(context)           │
-        │  • WeightingEngine(method)                           │
-        │  • RollCalendar per ticker                           │
-        ▼
-run_calculation(start, end):
-        │  prefetch all closes as dict[ticker → dict[date → float]]
-        │  iterate business_days(start, end):
-        │    • spot_return   = Σ w_i × (close_i,t / close_i,t-1 − 1)
-        │    • roll_return   = Σ w_i × Δfrac_i × (front_i/deferred_i − 1)
-        │    • coll_return   = collateral_rate / 360
-        │    • excess_return = spot + roll
-        │    • total_return  = excess + collateral
-        │    on rebalance days: WeightingEngine.compute_weights(eligible, dt, context)
-        ▼
-pl.DataFrame (date, *_return, *_level, w_<ticker>…)
+        ├─ DataStoreMarketDataService  (get_ohlcv, get_options_chain)
+        └─ CSVReferenceDataService     (get_contract_specs, get_roll_schedule, get_production_weights)
         │
         ▼
-VectorizedSimulator.run()
-        │  turnover = 0.5 × Σ|Δw_i|  (Polars .diff())
-        │  cost = turnover × (commission_bps + slippage_bps) / 10_000
-        │  net_return = gross_return − cost
-        │  levels via cum_prod()
+  CalculationContext  (singleton for the process lifetime)
+        │
         ▼
-BacktestResult(timeseries, risk_gross, risk_net)
+  init_calculators(context)
+        ├─ BCOMCalculator(context)   builds: config, universe, WeightingEngine("liquidity"),
+        │                                    roll_calendars, RebalancingEngine  [once]
+        └─ GSCICalculator(context)   builds: config, universe, WeightingEngine("production"),
+                                             roll_calendars, RebalancingEngine  [once]
+
+Per request:
+  calculate(index_name, start, end)
+        │
+        ▼
+  _CALCULATOR_REGISTRY[index_name].calculate(start, end)
+        │
+        └─► Calculator._run_calculation(...):
+                  prefetch all closes: dict[ticker → dict[date → float]]
+                  iterate business_days(start, end):
+                    • spot_return   = Σ w_i × (close_i,t / close_i,t-1 − 1)
+                    • roll_return   = Σ w_i × Δfrac_i × (front_i/deferred_i − 1)
+                    • coll_return   = collateral_rate / 360
+                    • excess_return = spot + roll
+                    • total_return  = excess + collateral
+                    on rebalance days: WeightingEngine.compute_weights(eligible, dt, context)
+                  ▼
+        pl.DataFrame (date, *_return, *_level, w_<ticker>…)
+                  │
+                  ▼
+        VectorizedSimulator.run()
+                  │  turnover = 0.5 × Σ|Δw_i|  (Polars .diff())
+                  │  cost = turnover × (commission_bps + slippage_bps) / 10_000
+                  │  net_return = gross_return − cost
+                  │  levels via cum_prod()
+                  ▼
+        BacktestResult(timeseries, risk_gross, risk_net)
 ```
 
 ---
@@ -185,9 +183,11 @@ BacktestResult(timeseries, risk_gross, risk_net)
 |----------------|---------------|
 | Servlet Container | FastAPI/uvicorn process inside Docker |
 | `ServletContext` | `CalculationContext` (application-scoped, immutable after startup) |
-| `service(request, response)` | `calculate(index_name, start, end, context) → pl.DataFrame` |
-| `HttpServlet` subclass | `IndexCalculationEngine` (instantiated fresh per request) |
-| Servlet init | `lifespan()` in `qis_engine_ui/main.py` — builds context once |
+| `HttpServlet` subclass | `BCOMCalculator` / `GSCICalculator` — one singleton per index, built at startup |
+| `servlet.init()` | `Calculator.__init__(context)` — builds all engine components once |
+| `service(request, response)` | `Calculator.calculate(start, end)` — runs the daily loop |
+| Servlet dispatcher | `calculate(index_name, ...)` in `engine.py` — routes to the right singleton |
+| Servlet init phase | `init_calculators(context)` called from `lifespan()` in `main.py` |
 
 ---
 
@@ -263,7 +263,7 @@ docker run -p 8080:8080 qis-engine
 
 | Concern | How to extend |
 |---------|--------------|
-| New data source | Implement `MarketDataService` and/or `ReferenceDataService` and pass them into a new `CalculationContext` |
-| New weighting method | Add a subclass of `_WeightingStrategy` and register it in `WeightingEngine.__init__` |
+| New index | Create `calculation/strategy/<name>.py` implementing `Calculator`; register in `init_calculators()` in `engine.py` |
+| New data source | Implement `MarketDataService` and/or `ReferenceDataService`; pass into a new `CalculationContext` |
+| New weighting method | Add a subclass of `_WeightingStrategy`; register it in `WeightingEngine.__init__` |
 | New roll algorithm | Implement a class with `find_roll_date(...)` matching the `OIRollFinder` / `MomentumRollFinder` signature |
-| New index | Call `IndexConfig(...)` directly or add a factory in `core/index.py`; register in `_CONFIG_REGISTRY` in `engine.py` |
