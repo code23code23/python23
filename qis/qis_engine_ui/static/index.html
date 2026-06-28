@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QIS Engine</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #f8fafc;
+      margin-bottom: 1.5rem;
+    }
+
+    .form-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 1.5rem;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 0.3rem; }
+
+    label {
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    select, input[type="date"] {
+      background: #1e2433;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      padding: 0.45rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    select:focus, input[type="date"]:focus {
+      border-color: #6366f1;
+      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+    }
+
+    button {
+      padding: 0.5rem 1.5rem;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      align-self: flex-end;
+    }
+
+    button:hover { background: #4f46e5; }
+    button:disabled { background: #334155; cursor: not-allowed; }
+
+    .spinner {
+      display: none;
+      width: 1.2rem;
+      height: 1.2rem;
+      border: 2px solid #334155;
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      align-self: center;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-banner {
+      display: none;
+      background: #450a0a;
+      border: 1px solid #991b1b;
+      color: #fca5a5;
+      padding: 0.65rem 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      font-size: 0.875rem;
+    }
+
+    .summary-row {
+      display: none;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .card {
+      background: #1e2433;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 0.9rem 1.25rem;
+      min-width: 160px;
+    }
+
+    .card-label {
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #64748b;
+      margin-bottom: 0.3rem;
+    }
+
+    .card-value {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+
+    .table-wrap {
+      display: none;
+      overflow-y: auto;
+      max-height: 65vh;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #161b27;
+      color: #94a3b8;
+      text-transform: uppercase;
+      font-size: 0.68rem;
+      letter-spacing: 0.07em;
+      padding: 0.6rem 0.75rem;
+      text-align: right;
+      border-bottom: 1px solid #1e293b;
+      white-space: nowrap;
+    }
+
+    thead th:first-child { text-align: left; }
+
+    tbody tr { border-bottom: 1px solid #1a2035; }
+    tbody tr:hover { background: #1a2235; }
+
+    tbody td {
+      padding: 0.4rem 0.75rem;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      color: #cbd5e1;
+    }
+
+    tbody td:first-child { text-align: left; color: #94a3b8; }
+
+    .pos { color: #34d399; }
+    .neg { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>QIS Index Engine</h1>
+
+  <div class="form-row">
+    <div class="field">
+      <label for="idx">Index</label>
+      <select id="idx">
+        <option value="BCOM">BCOM</option>
+        <option value="GSCI">GSCI</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="start">Start date</label>
+      <input type="date" id="start" value="2020-01-02">
+    </div>
+    <div class="field">
+      <label for="end">End date</label>
+      <input type="date" id="end" value="2021-12-31">
+    </div>
+    <button id="calc-btn">Calculate</button>
+    <div class="spinner" id="spinner"></div>
+  </div>
+
+  <div class="error-banner" id="error-banner"></div>
+
+  <div class="summary-row" id="summary-row">
+    <div class="card">
+      <div class="card-label">Spot level</div>
+      <div class="card-value" id="s-spot"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Excess level</div>
+      <div class="card-value" id="s-excess"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Total level</div>
+      <div class="card-value" id="s-total"></div>
+    </div>
+    <div class="card">
+      <div class="card-label">Days</div>
+      <div class="card-value" id="s-days"></div>
+    </div>
+  </div>
+
+  <div class="table-wrap" id="table-wrap">
+    <table id="result-table">
+      <thead id="result-thead"></thead>
+      <tbody id="result-tbody"></tbody>
+    </table>
+  </div>
+
+  <script>
+    const RETURN_COLS = new Set([
+      "spot_return", "roll_return", "collateral_return",
+      "excess_return", "total_return"
+    ]);
+    const LEVEL_COLS = new Set(["spot_level", "excess_level", "total_level"]);
+
+    function fmtCell(col, val) {
+      if (val === null || val === undefined) return "—";
+      if (col === "date") return val;
+      if (col.startsWith("w_")) {
+        const pct = (val * 100).toFixed(1);
+        return pct + "%";
+      }
+      if (RETURN_COLS.has(col)) {
+        const pct = (val * 100).toFixed(4);
+        const sign = val >= 0 ? "+" : "";
+        return `<span class="${val >= 0 ? "pos" : "neg"}">${sign}${pct}%</span>`;
+      }
+      if (LEVEL_COLS.has(col)) return parseFloat(val).toFixed(2);
+      return val;
+    }
+
+    function fmtHeader(col) {
+      return col
+        .replace(/^w_/, "")
+        .replace(/_/g, " ")
+        .toUpperCase();
+    }
+
+    function renderSummary(s) {
+      document.getElementById("s-spot").textContent = s.spot_final.toFixed(2);
+      document.getElementById("s-excess").textContent = s.excess_final.toFixed(2);
+      document.getElementById("s-total").textContent = s.total_final.toFixed(2);
+      document.getElementById("s-days").textContent = s.n_days.toLocaleString();
+      document.getElementById("summary-row").style.display = "flex";
+    }
+
+    function renderTable(columns, rows) {
+      const thead = document.getElementById("result-thead");
+      const tbody = document.getElementById("result-tbody");
+
+      thead.innerHTML = "<tr>" + columns.map(c => `<th>${fmtHeader(c)}</th>`).join("") + "</tr>";
+
+      const fragment = document.createDocumentFragment();
+      for (const row of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = columns.map(c => `<td>${fmtCell(c, row[c])}</td>`).join("");
+        fragment.appendChild(tr);
+      }
+      tbody.innerHTML = "";
+      tbody.appendChild(fragment);
+
+      document.getElementById("table-wrap").style.display = "block";
+    }
+
+    function showError(msg) {
+      const el = document.getElementById("error-banner");
+      el.textContent = msg;
+      el.style.display = "block";
+    }
+
+    function hideError() {
+      document.getElementById("error-banner").style.display = "none";
+    }
+
+    document.getElementById("calc-btn").addEventListener("click", async () => {
+      const index = document.getElementById("idx").value;
+      const start = document.getElementById("start").value;
+      const end   = document.getElementById("end").value;
+
+      if (!start || !end) { showError("Please select both start and end dates."); return; }
+
+      hideError();
+      document.getElementById("summary-row").style.display = "none";
+      document.getElementById("table-wrap").style.display = "none";
+      document.getElementById("calc-btn").disabled = true;
+      document.getElementById("spinner").style.display = "block";
+
+      try {
+        const resp = await fetch("/api/calculate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ index, start, end }),
+        });
+
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          showError(data.detail || "Calculation failed.");
+          return;
+        }
+
+        renderSummary(data.summary);
+        renderTable(data.columns, data.rows);
+      } catch (err) {
+        showError("Network error: " + err.message);
+      } finally {
+        document.getElementById("calc-btn").disabled = false;
+        document.getElementById("spinner").style.display = "none";
+      }
+    });
+  </script>
+</body>
+</html>
