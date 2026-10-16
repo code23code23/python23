@@ -2,40 +2,32 @@ from __future__ import annotations
 
 from datetime import date
 
-import polars as pl
-
-from qis_engine.calculation.calculator import Calculator
-from qis_engine.calculation.rebalancer import RebalancingEngine
+from qis_engine.calculation.calculator_base import CalculatorBase
 from qis_engine.context.base import CalculationContext
 from qis_engine.core.index import GSCIIndex
-from qis_engine.core.roll import RollCalendar
-from qis_engine.core.universe import CommodityUniverse
 from qis_engine.core.weighting import WeightingConstraints, WeightingEngine
+from qis_engine.data.models import ContractSpec
 
 
-class GSCICalculator(Calculator):
+class GSCICalculator(CalculatorBase):
+    """GSCI: world-production weights; roll per the GSCI roll calendar."""
+
     def __init__(self, context: CalculationContext) -> None:
-        super().__init__(context)
-        self._config = GSCIIndex.default_config()
-        self._universe = CommodityUniverse.from_context(context)
-        self._weighting = WeightingEngine(self._config.weighting_method)
-        schedule_df = context.reference_data.get_roll_schedule(self._config.name)
-        self._roll_calendars: dict[str, RollCalendar] = (
-            {t: RollCalendar(t, schedule_df) for t in self._config.tickers}
-            if not schedule_df.is_empty() else {}
-        )
-        self._rebalancer = RebalancingEngine(
-            self._config.rebalance_schedule,
-            announce_month=self._config.rebalance_announce_month,
-        )
+        super().__init__(context, GSCIIndex.default_config())
+        self._weighting = WeightingEngine("production")
 
-    def calculate(
+    def _compute_weights(
         self,
-        start: date,
-        end: date,
-        constraints: WeightingConstraints | None = None,
-    ) -> pl.DataFrame:
-        return self._run_calculation(
-            self._config, self._universe, self._weighting,
-            self._roll_calendars, self._rebalancer, start, end, constraints,
-        )
+        eligible: list[ContractSpec],
+        as_of: date,
+        constraints: WeightingConstraints,
+    ) -> dict[str, float]:
+        return self._weights_from_engine(self._weighting, eligible, as_of, constraints)
+
+    def _compute_roll_return(
+        self,
+        dt: date,
+        weights: dict[str, float],
+        today_prices: dict[str, float],
+    ) -> float:
+        return self._scheduled_roll_return(dt, weights, today_prices)

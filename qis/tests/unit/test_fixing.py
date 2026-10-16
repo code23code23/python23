@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from qis_engine.calculation.engine import IndexCalculationEngine
+from qis_engine.calculation.strategy.configured import ConfiguredCalculator
 from qis_engine.calculation.fixing import IndexFixingWorkflow, ValidationResult
 from qis_engine.core.index import IndexConfig, RebalanceSchedule
 from qis_engine.core.universe import CommodityUniverse
@@ -55,10 +55,10 @@ def _make_store_with_history(tmp_path: Path) -> tuple:
     )
     universe = CommodityUniverse([_spec("A")])
     weighting = WeightingEngine("equal")
-    engine = IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
+    engine = ConfiguredCalculator(context, config, universe, weighting, roll_calendars={})
 
     # Pre-populate index levels from historical run
-    hist = engine.run_calculation(date(2023, 1, 2), date(2023, 1, 31))
+    hist = engine.calculate(date(2023, 1, 2), date(2023, 1, 31))
     store.write_index_level(hist, "TEST")
 
     workflow = IndexFixingWorkflow(engine, store, "TEST")

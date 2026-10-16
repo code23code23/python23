@@ -1,4 +1,4 @@
-"""Tests for calculation/engine.py — return math driven by in-memory stub data."""
+"""Tests for calculation/calculator.py — return math driven by in-memory stub data."""
 from __future__ import annotations
 
 from datetime import date
@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 import pytest
 
-from qis_engine.calculation.engine import IndexCalculationEngine
+from qis_engine.calculation.strategy.configured import ConfiguredCalculator
 from qis_engine.calculation.rebalancer import RebalancingEngine
 from qis_engine.core.index import BCOMIndex, IndexConfig, RebalanceSchedule, ReturnType
 from qis_engine.core.roll import RollCalendar
@@ -78,7 +78,7 @@ def _make_context(store):
 
 def _make_engine(
     store, tickers: list[str], method: str = "equal"
-) -> IndexCalculationEngine:
+) -> ConfiguredCalculator:
     config = IndexConfig(
         name="TEST",
         base_date=date(2022, 1, 3),
@@ -90,7 +90,7 @@ def _make_engine(
     context = _make_context(store)
     universe = CommodityUniverse([_spec(t) for t in tickers])
     weighting = WeightingEngine(method)
-    return IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
+    return ConfiguredCalculator(context, config, universe, weighting, roll_calendars={})
 
 
 # ---------------------------------------------------------------------------
@@ -101,21 +101,21 @@ class TestFlatPrices:
     def test_spot_return_zero_on_flat_prices(self, tmp_path):
         store = _flat_store(tmp_path, ["A", "B"])
         engine = _make_engine(store, ["A", "B"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         non_zero = result.filter(pl.col("spot_return").abs() > 1e-10)
         assert len(non_zero) == 0, f"Expected all spot returns ≈ 0 for flat prices"
 
     def test_level_constant_on_flat_prices(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         levels = result["excess_level"].to_list()
         assert all(abs(l - 100.0) < 1e-6 for l in levels), "Level should stay at 100 for flat prices"
 
     def test_weights_sum_to_one_every_day(self, tmp_path):
         store = _flat_store(tmp_path, ["A", "B", "C"])
         engine = _make_engine(store, ["A", "B", "C"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         weight_cols = [c for c in result.columns if c.startswith("w_")]
         assert len(weight_cols) == 3
         row_sums = result.select(pl.sum_horizontal(weight_cols).alias("ws"))["ws"]
@@ -126,14 +126,14 @@ class TestTrendingPrices:
     def test_positive_return_produces_growing_level(self, tmp_path):
         store = _trending_store(tmp_path, "X", daily_return=0.001)
         engine = _make_engine(store, ["X"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         assert float(result["excess_level"][-1]) > 100.0
 
     def test_spot_return_matches_daily_return(self, tmp_path):
         dr = 0.005
         store = _trending_store(tmp_path, "X", daily_return=dr)
         engine = _make_engine(store, ["X"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         spot_returns = result.filter(pl.col("spot_return") != 0.0)["spot_return"]
         assert all(abs(r - dr) < 1e-6 for r in spot_returns.to_list()), (
             f"Expected daily spot returns ≈ {dr}"
@@ -143,7 +143,7 @@ class TestTrendingPrices:
         dr = 0.001
         store = _trending_store(tmp_path, "X", daily_return=dr)
         engine = _make_engine(store, ["X"])
-        result = engine.run_calculation(date(2022, 1, 3), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 3), date(2022, 3, 31))
         n = len(result) - 1
         expected_level = 100.0 * (1 + dr) ** n
         actual_level = float(result["excess_level"][-1])
@@ -154,14 +154,14 @@ class TestReturnDecomposition:
     def test_excess_return_equals_spot_plus_roll(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         diff = (result["excess_return"] - result["spot_return"] - result["roll_return"]).abs()
         assert diff.max() < 1e-12
 
     def test_total_return_equals_excess_plus_collateral(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         diff = (
             result["total_return"] - result["excess_return"] - result["collateral_return"]
         ).abs()
@@ -170,13 +170,13 @@ class TestReturnDecomposition:
     def test_collateral_zero_when_rate_zero(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         assert result["collateral_return"].abs().max() < 1e-12
 
     def test_output_columns_present(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         required = {"date", "spot_return", "roll_return", "collateral_return",
                     "excess_return", "total_return", "spot_level",
                     "excess_level", "total_level"}
@@ -185,7 +185,7 @@ class TestReturnDecomposition:
     def test_levels_positive_throughout(self, tmp_path):
         store = _flat_store(tmp_path, ["A", "B"])
         engine = _make_engine(store, ["A", "B"])
-        result = engine.run_calculation(date(2022, 1, 4), date(2022, 3, 31))
+        result = engine.calculate(date(2022, 1, 4), date(2022, 3, 31))
         assert (result["spot_level"] > 0).all()
         assert (result["excess_level"] > 0).all()
         assert (result["total_level"] > 0).all()
@@ -215,5 +215,5 @@ class TestRebalancer:
     def test_no_empty_output(self, tmp_path):
         store = _flat_store(tmp_path, ["A"])
         engine = _make_engine(store, ["A"])
-        result = engine.run_calculation(date(2022, 1, 3), date(2022, 1, 31))
+        result = engine.calculate(date(2022, 1, 3), date(2022, 1, 31))
         assert len(result) > 0

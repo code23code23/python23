@@ -31,7 +31,7 @@ class VectorizedSimulator:
     """
     Fully vectorized backtesting engine built on Polars expressions.
 
-    Takes a pre-computed index calculation DataFrame (from IndexCalculationEngine)
+    Takes a pre-computed index calculation DataFrame (from a Calculator)
     and applies transaction costs on rebalance / roll dates to produce
     net-of-cost return series and risk metrics.
 
@@ -50,7 +50,7 @@ class VectorizedSimulator:
 
     def run(
         self,
-        engine: "IndexCalculationEngine",               # noqa: F821
+        calculator: "Calculator",                       # noqa: F821
         start: date,
         end: date,
         constraints: "WeightingConstraints | None" = None,  # noqa: F821
@@ -59,20 +59,20 @@ class VectorizedSimulator:
         """
         Run a full historical simulation.
 
-        1. Call engine.run_calculation() to get gross index returns and weights.
+        1. Call calculator.calculate() to get gross index returns and weights.
         2. Compute daily turnover from weight changes (vectorized diff).
         3. Apply cost model: net_return = gross_return - cost_per_day.
         4. Compound net level; compute risk metrics.
         """
-        gross_df = engine.run_calculation(
+        gross_df = calculator.calculate(
             start, end,
             constraints=constraints,
             collateral_rate_series=collateral_rate_series,
         )
         if gross_df.is_empty():
-            return self._empty_result(engine._config.name, start, end)
+            return self._empty_result(calculator.config.name, start, end)
 
-        result_df = self._apply_costs(gross_df, engine._config)
+        result_df = self._apply_costs(gross_df, calculator.config)
         risk_gross = self._risk_calc.compute(
             result_df["gross_return"], result_df["gross_level"]
         )
@@ -81,7 +81,7 @@ class VectorizedSimulator:
         )
 
         return BacktestResult(
-            config_name=engine._config.name,
+            config_name=calculator.config.name,
             start=start,
             end=end,
             timeseries=result_df,

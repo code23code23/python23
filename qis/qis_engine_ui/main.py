@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from qis_engine.calculation.engine import calculate, init_calculators
+from qis_engine.calculation.engine import calculate, init_engine
 from qis_engine.context.default import build_default_context
 
 STUBS_DIR = Path(__file__).parents[1] / "tests" / "stubs"
@@ -21,7 +21,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     context = build_default_context(STUBS_DIR)
-    init_calculators(context)   # build one Calculator instance per index at startup
+    init_engine(context)   # context is shared; a Calculator is created per request
     yield
 
 
@@ -42,7 +42,7 @@ def index():
 
 @app.post("/api/calculate")
 def calculate_endpoint(req: CalcRequest):
-    """Servlet service() equivalent — delegates to application-scoped Calculator singleton."""
+    """Servlet service() equivalent — the engine creates a Calculator for this request."""
     if req.end < req.start:
         raise HTTPException(status_code=400, detail="end date must be on or after start date")
 

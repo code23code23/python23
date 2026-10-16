@@ -34,9 +34,9 @@ Open `http://localhost:8080` in a browser.
 On startup the server:
 1. Creates a temporary Parquet store in a system temp directory
 2. Loads all CSV stub data from `qis/tests/stubs/` (OHLCV, options chains, roll schedules)
-3. Builds `IndexCalculationEngine` instances for both BCOM and GSCI
+3. Hands the `CalculationContext` to the engine (`init_engine`)
 
-Each calculation request runs `engine.run_calculation(start, end)` fresh — results are not cached between requests.
+Each calculation request creates a new `Calculator` for the chosen index and runs `calculate(start, end)` — nothing is cached between requests.
 
 ---
 

@@ -11,7 +11,7 @@ import pytest
 from qis_engine.backtest.costs import CommissionModel, SlippageModel, TransactionCostModel
 from qis_engine.backtest.risk import RiskCalculator
 from qis_engine.backtest.simulator import VectorizedSimulator
-from qis_engine.calculation.engine import IndexCalculationEngine
+from qis_engine.calculation.strategy.configured import ConfiguredCalculator
 from qis_engine.core.index import IndexConfig, RebalanceSchedule
 from qis_engine.core.universe import CommodityUniverse
 from qis_engine.core.weighting import WeightingEngine
@@ -61,7 +61,7 @@ def _make_engine_and_store(tmp_path: Path, tickers=("A", "B"), daily_return=0.00
     )
     universe = CommodityUniverse([_spec(t) for t in tickers])
     weighting = WeightingEngine("equal")
-    engine = IndexCalculationEngine(config, context, universe, weighting, roll_calendars={})
+    engine = ConfiguredCalculator(context, config, universe, weighting, roll_calendars={})
     return engine, store
 
 

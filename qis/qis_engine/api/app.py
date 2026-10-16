@@ -66,7 +66,7 @@ def init_app(
     from qis_engine.context.default import build_default_context
     from qis_engine.data.csv_stub import CSVStubProvider
     from qis_engine.data.store import DataStoreFactory
-    from qis_engine.calculation.engine import init_calculators
+    from qis_engine.calculation.engine import init_engine
 
     root = Path(store_root) if store_root else Path(tempfile.mkdtemp())
     stubs = Path(stubs_dir) if stubs_dir else Path(__file__).parents[2] / "tests" / "stubs"
@@ -80,7 +80,7 @@ def init_app(
     store.write_roll_schedule(roll_df, "GSCI")
 
     context = build_default_context(stubs, store)
-    init_calculators(context)
+    init_engine(context)
 
     return create_app(store=store, context=context)
 

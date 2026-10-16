@@ -40,11 +40,11 @@ class IndexFixingWorkflow:
 
     def __init__(
         self,
-        engine: "IndexCalculationEngine",  # noqa: F821
+        calculator: "Calculator",  # noqa: F821
         store: "DataStore",  # noqa: F821
         index_name: str,
     ) -> None:
-        self._engine = engine
+        self._calculator = calculator
         self._store = store
         self._index_name = index_name
 
@@ -70,7 +70,7 @@ class IndexFixingWorkflow:
         prior = prior_df.row(0, named=True)
 
         # Calculate today's returns
-        result_df = self._engine.run_calculation(
+        result_df = self._calculator.calculate(
             fix_date, fix_date,
             collateral_rate_series=pl.Series([collateral_rate]),
         )

@@ -1,6 +1,6 @@
 """
 Integration test: full BCOM-style index calculation from CSV stub data.
-Validates the end-to-end pipeline: CalculationContext → IndexCalculationEngine.
+Validates the end-to-end pipeline: CalculationContext → Calculator.
 """
 from __future__ import annotations
 
@@ -22,10 +22,8 @@ def context(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def bcom_engine(context):
-    from qis_engine.calculation.engine import IndexCalculationEngine
-    from qis_engine.core.index import BCOMIndex
-    config = BCOMIndex.default_config()
-    return IndexCalculationEngine.from_config(config, context)
+    from qis_engine.calculation.strategy.bcom import BCOMCalculator
+    return BCOMCalculator(context)
 
 
 class TestCSVStubLoading:
@@ -65,12 +63,12 @@ class TestBCOMCalculation:
     END = date(2021, 12, 31)
 
     def test_calculation_runs_without_error(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         assert isinstance(result, pl.DataFrame)
         assert len(result) > 0
 
     def test_required_columns_present(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         required = {
             "date", "spot_return", "roll_return", "collateral_return",
             "excess_return", "total_return", "spot_level", "excess_level", "total_level",
@@ -78,41 +76,41 @@ class TestBCOMCalculation:
         assert required.issubset(set(result.columns))
 
     def test_levels_start_at_base(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         assert abs(float(result["excess_level"][0]) - 100.0) < 1e-6
 
     def test_levels_always_positive(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         assert (result["spot_level"] > 0).all()
         assert (result["excess_level"] > 0).all()
         assert (result["total_level"] > 0).all()
 
     def test_no_null_values_in_returns(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         for col in ("spot_return", "excess_return", "total_return"):
             assert result[col].null_count() == 0
 
     def test_excess_return_decomposition(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         diff = (result["excess_return"] - result["spot_return"] - result["roll_return"]).abs()
         assert diff.max() < 1e-12
 
     def test_weights_sum_to_one(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         w_cols = [c for c in result.columns if c.startswith("w_")]
         assert len(w_cols) == 7  # 7 commodities
         row_sums = result.select(pl.sum_horizontal(w_cols).alias("ws"))["ws"]
         assert (row_sums - 1.0).abs().max() < 1e-9
 
     def test_date_range_covers_requested_period(self, bcom_engine):
-        result = bcom_engine.run_calculation(self.START, self.END)
+        result = bcom_engine.calculate(self.START, self.END)
         assert result["date"].min() >= self.START
         assert result["date"].max() <= self.END
 
     def test_10_year_calculation_performance(self, bcom_engine):
         import time
         t0 = time.perf_counter()
-        result = bcom_engine.run_calculation(date(2014, 1, 1), date(2024, 12, 31))
+        result = bcom_engine.calculate(date(2014, 1, 1), date(2024, 12, 31))
         elapsed = time.perf_counter() - t0
         assert elapsed < 30.0, f"10-year calculation took {elapsed:.1f}s (limit: 30s)"
         assert len(result) > 2000

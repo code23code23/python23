@@ -11,24 +11,27 @@ The design is modelled on the Java Servlet architecture:
 - **Container** — the FastAPI/uvicorn process started inside a Docker container
 - **CalculationContext** — analogous to `ServletContext`; an application-scoped, immutable
   service provider created once at startup and shared safely across all concurrent requests
-- **`Calculator` subclasses** — analogous to `HttpServlet`; one singleton per index, holding
-  the context and all engine components, built once by `init_calculators(context)` at startup
+- **`Calculator` subclasses** — analogous to `HttpServlet`; one class per index, registered by
+  name in `engine.py`. A fresh instance is created for every run, so each run reads current
+  reference data
 - **`calculate()`** — the module-level entry point in `engine.py`, analogous to a Servlet's
-  `service()` method; dispatches to the pre-built `Calculator` singleton for the given index
+  `service()` method; looks up the index's `Calculator` class, instantiates it with the
+  context, and runs it
 
 The core flow is:
 
 ```
 Server startup (lifespan)
   build_default_context(stubs_dir) → CalculationContext (singleton)
-  init_calculators(context)        → BCOMCalculator, GSCICalculator (singletons)
+  init_engine(context)             → engine holds the context
 
 Per request
   calculate(index_name, start, end)
        │
-       └─► _CALCULATOR_REGISTRY[index_name].calculate(start, end)
-                   │  (uses self._context, self._universe,
-                   │   self._weighting, self._roll_calendars, self._rebalancer)
+       └─► create_calculator(index_name)          _CALCULATOR_REGISTRY: name → Calculator class
+                   │  calculator_cls(context)      new instance for this run
+                   ▼
+           CalculatorBase.calculate(start, end)    shared loop → subclass hooks
                    ▼
            pl.DataFrame (date, *_return, *_level, w_<ticker>…)
                    │
@@ -53,11 +56,13 @@ qis/
 │   ├── futures/            # Contract and chain representations, roll cost
 │   ├── options/            # Black-76 pricing, greeks, option strategies
 │   ├── calculation/        # Calculator base, per-index strategies, engine, rebalancer, fixing
-│   │   ├── calculator.py   #   Calculator ABC + shared daily loop (_run_calculation)
+│   │   ├── calculator.py   #   Calculator ABC — abstract calculate()
+│   │   ├── calculator_base.py # CalculatorBase — shared daily loop; strategy hooks
 │   │   ├── strategy/       #   Per-index Calculator implementations
 │   │   │   ├── bcom.py     #     BCOMCalculator
-│   │   │   └── gsci.py     #     GSCICalculator
-│   │   ├── engine.py       #   IndexCalculationEngine; init_calculators(); calculate()
+│   │   │   ├── gsci.py     #     GSCICalculator
+│   │   │   └── configured.py #   ConfiguredCalculator (config-driven; ad-hoc/test indices)
+│   │   ├── engine.py       #   calculator registry; init_engine(); create_calculator(); calculate()
 │   │   ├── rebalancer.py   #   RebalancingEngine
 │   │   └── fixing.py       #   IndexFixingWorkflow
 │   ├── backtest/           # Vectorized simulator, transaction costs, risk metrics
@@ -111,10 +116,12 @@ Low-level I/O building blocks used by the `context/` layer.
 
 | Module | Responsibility |
 |--------|---------------|
-| `calculator.py` | `Calculator` ABC — `__init__(context)` stores the context; abstract `calculate(start, end, constraints)`; concrete `_run_calculation(...)` containing the full shared daily loop; `_compute_roll_return` and `_zero_record` helpers |
-| `strategy/bcom.py` | `BCOMCalculator(Calculator)` — owns BCOM config, universe, weighting engine, roll calendars, rebalancer; all built once in `__init__(context)`; `calculate()` calls `_run_calculation` |
-| `strategy/gsci.py` | `GSCICalculator(Calculator)` — same pattern for GSCI |
-| `engine.py` | `IndexCalculationEngine` (used by fixing, backtest, and tests directly); `_CALCULATOR_REGISTRY` dict; `init_calculators(context)` populates it at startup; module-level `calculate()` dispatches to the registry |
+| `calculator.py` | `Calculator` ABC — holds `context` and `config`; abstract `calculate(start, end, constraints, collateral_rate_series)`. The type the engine, fixing and backtest depend on |
+| `calculator_base.py` | `CalculatorBase(Calculator)` — template method: implements `calculate()` (business days, price prefetch, spot return, level compounding, output frame) and delegates to abstract `_compute_weights(eligible, as_of, constraints)` and `_compute_roll_return(dt, weights, prices)`; overridable `_is_rebalance_day`, `_collateral_return`; helpers `_weights_from_engine`, `_scheduled_roll_return` |
+| `strategy/bcom.py` | `BCOMCalculator(CalculatorBase)` — BCOM config; liquidity weighting; scheduled roll |
+| `strategy/gsci.py` | `GSCICalculator(CalculatorBase)` — GSCI config; production weighting; scheduled roll |
+| `strategy/configured.py` | `ConfiguredCalculator(CalculatorBase)` — weighting from `config.weighting_method`; components injectable; used for ad-hoc and test indices |
+| `engine.py` | `_CALCULATOR_REGISTRY` (index name → `Calculator` class); `register_calculator()`, `available_calculators()`; `init_engine(context)` stores the context at startup; `create_calculator(name)` returns a new instance per run; module-level `calculate()` = `create_calculator(name).calculate(...)` |
 | `rebalancer.py` | `RebalancingEngine` — determines rebalance dates for annual, monthly, and quarterly schedules |
 | `fixing.py` | `IndexFixingWorkflow` — handles official index fixing and publication |
 
@@ -141,19 +148,19 @@ Server startup:
   CalculationContext  (singleton for the process lifetime)
         │
         ▼
-  init_calculators(context)
-        ├─ BCOMCalculator(context)   builds: config, universe, WeightingEngine("liquidity"),
-        │                                    roll_calendars, RebalancingEngine  [once]
-        └─ GSCICalculator(context)   builds: config, universe, WeightingEngine("production"),
-                                             roll_calendars, RebalancingEngine  [once]
+  init_engine(context)          stores the context; registry holds classes only
 
-Per request:
+Per request (or per batch item):
   calculate(index_name, start, end)
         │
         ▼
-  _CALCULATOR_REGISTRY[index_name].calculate(start, end)
+  create_calculator(index_name)
+        ├─ BCOMCalculator(context)   builds: config, universe, WeightingEngine("liquidity"),
+        │                                    roll_calendars, RebalancingEngine  [this run]
+        └─ GSCICalculator(context)   builds: config, universe, WeightingEngine("production"),
+                                             roll_calendars, RebalancingEngine  [this run]
         │
-        └─► Calculator._run_calculation(...):
+        └─► CalculatorBase.calculate(...):   (weights / roll via subclass hooks)
                   prefetch all closes: dict[ticker → dict[date → float]]
                   iterate business_days(start, end):
                     • spot_return   = Σ w_i × (close_i,t / close_i,t-1 − 1)
@@ -183,11 +190,11 @@ Per request:
 |----------------|---------------|
 | Servlet Container | FastAPI/uvicorn process inside Docker |
 | `ServletContext` | `CalculationContext` (application-scoped, immutable after startup) |
-| `HttpServlet` subclass | `BCOMCalculator` / `GSCICalculator` — one singleton per index, built at startup |
-| `servlet.init()` | `Calculator.__init__(context)` — builds all engine components once |
+| `HttpServlet` subclass | `BCOMCalculator` / `GSCICalculator` — one class per index, instantiated per run |
+| `servlet.init()` | `Calculator.__init__(context)` — builds universe, weighting, roll calendars for this run |
 | `service(request, response)` | `Calculator.calculate(start, end)` — runs the daily loop |
-| Servlet dispatcher | `calculate(index_name, ...)` in `engine.py` — routes to the right singleton |
-| Servlet init phase | `init_calculators(context)` called from `lifespan()` in `main.py` |
+| Servlet dispatcher | `calculate(index_name, ...)` in `engine.py` — looks up the class and creates an instance |
+| Servlet init phase | `init_engine(context)` called from `lifespan()` in `main.py` |
 
 ---
 
@@ -263,7 +270,7 @@ docker run -p 8080:8080 qis-engine
 
 | Concern | How to extend |
 |---------|--------------|
-| New index | Create `calculation/strategy/<name>.py` implementing `Calculator`; register in `init_calculators()` in `engine.py` |
+| New index | Create `calculation/strategy/<name>.py` extending `CalculatorBase` (implement `_compute_weights`, `_compute_roll_return`), or `Calculator` directly for a different loop; add it to `_CALCULATOR_REGISTRY` in `engine.py` (or call `register_calculator()`) |
 | New data source | Implement `MarketDataService` and/or `ReferenceDataService`; pass into a new `CalculationContext` |
 | New weighting method | Add a subclass of `_WeightingStrategy`; register it in `WeightingEngine.__init__` |
 | New roll algorithm | Implement a class with `find_roll_date(...)` matching the `OIRollFinder` / `MomentumRollFinder` signature |
