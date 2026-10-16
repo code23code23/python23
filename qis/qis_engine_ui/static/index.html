@@ -125,13 +125,81 @@
       color: #f1f5f9;
     }
 
-    .table-wrap {
+    .results {
+      --series-1: #3987e5;   /* excess level */
+      --series-2: #d95926;   /* total level */
+      --chart-surface: #161b27;
+      --grid: #232a3b;
+      --axis: #334155;
       display: none;
-      overflow-y: auto;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: stretch;
+    }
+
+    .table-wrap {
+      flex: 1 1 480px;
+      min-width: 0;
+      overflow: auto;
       max-height: 65vh;
       border: 1px solid #1e293b;
       border-radius: 8px;
     }
+
+    .chart-panel {
+      flex: 1 1 480px;
+      min-width: 0;
+      height: 65vh;
+      min-height: 320px;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.9rem 1rem 0.5rem;
+      background: var(--chart-surface);
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+    }
+
+    .chart-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem 1rem;
+    }
+
+    .chart-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #94a3b8;
+    }
+
+    .legend { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: 0.8rem; color: #cbd5e1; }
+    .legend-item { display: flex; align-items: center; gap: 0.4rem; }
+
+    .chart-box { position: relative; flex: 1; min-height: 0; }
+    .chart-box svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .chart-box text { font-size: 11px; fill: #94a3b8; font-variant-numeric: tabular-nums; }
+
+    .chart-tip {
+      display: none;
+      position: absolute;
+      pointer-events: none;
+      background: #0f1117;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 0.45rem 0.6rem;
+      font-size: 0.75rem;
+      line-height: 1.5;
+      color: #e2e8f0;
+      white-space: nowrap;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+    .chart-tip .tip-date { color: #94a3b8; margin-bottom: 0.15rem; }
+    .chart-tip .tip-row { display: flex; align-items: center; gap: 0.4rem; }
+    .chart-tip .tip-val { margin-left: auto; padding-left: 0.75rem; font-variant-numeric: tabular-nums; }
 
     table {
       width: 100%;
@@ -216,11 +284,33 @@
     </div>
   </div>
 
-  <div class="table-wrap" id="table-wrap">
-    <table id="result-table">
-      <thead id="result-thead"></thead>
-      <tbody id="result-tbody"></tbody>
-    </table>
+  <div class="results" id="results">
+    <div class="table-wrap" id="table-wrap">
+      <table id="result-table">
+        <thead id="result-thead"></thead>
+        <tbody id="result-tbody"></tbody>
+      </table>
+    </div>
+
+    <section class="chart-panel" aria-labelledby="chart-title">
+      <div class="chart-head">
+        <div class="chart-title" id="chart-title">Index level</div>
+        <div class="legend">
+          <span class="legend-item">
+            <svg width="22" height="8" aria-hidden="true"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round"/></svg>
+            Excess level
+          </span>
+          <span class="legend-item">
+            <svg width="22" height="8" aria-hidden="true"><line x1="1" y1="4" x2="21" y2="4" stroke="var(--series-2)" stroke-width="2" stroke-linecap="round" stroke-dasharray="6 4"/></svg>
+            Total level
+          </span>
+        </div>
+      </div>
+      <div class="chart-box" id="chart-box">
+        <svg id="chart" role="img" aria-label="Line chart of excess and total index level over the selected date range. The table shows the same values."></svg>
+        <div class="chart-tip" id="chart-tip"></div>
+      </div>
+    </section>
   </div>
 
   <script>
@@ -229,6 +319,8 @@
       "excess_return", "total_return"
     ]);
     const LEVEL_COLS = new Set(["spot_level", "excess_level", "total_level"]);
+    // Returned by the API but not shown in the results table
+    const HIDDEN_COLS = new Set([...RETURN_COLS, "spot_level"]);
 
     function fmtCell(col, val) {
       if (val === null || val === undefined) return "—";
@@ -261,7 +353,8 @@
       document.getElementById("summary-row").style.display = "flex";
     }
 
-    function renderTable(columns, rows) {
+    function renderTable(allColumns, rows) {
+      const columns = allColumns.filter(c => !HIDDEN_COLS.has(c));
       const thead = document.getElementById("result-thead");
       const tbody = document.getElementById("result-tbody");
 
@@ -275,9 +368,135 @@
       }
       tbody.innerHTML = "";
       tbody.appendChild(fragment);
-
-      document.getElementById("table-wrap").style.display = "block";
     }
+
+    // ------------------------------------------------------------------
+    // Line chart: excess and total level
+    // ------------------------------------------------------------------
+
+    const CHART_SERIES = [
+      { key: "excess_level", name: "Excess level", color: "var(--series-1)", dash: "" },
+      { key: "total_level",  name: "Total level",  color: "var(--series-2)", dash: "6 4" },
+    ];
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    let chartRows = null;
+
+    function niceTicks(min, max, count) {
+      const span = max - min || Math.abs(max) || 1;
+      const raw = span / count;
+      const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+      const lo = Math.floor(min / step) * step;
+      const hi = Math.ceil(max / step) * step;
+      const ticks = [];
+      for (let v = lo; v <= hi + step / 2; v += step) ticks.push(+v.toFixed(10));
+      return ticks;
+    }
+
+    function fmtDate(d, withDay) {
+      return d.toLocaleDateString("en-US", withDay
+        ? { day: "numeric", month: "short", year: "numeric" }
+        : { month: "short", year: "numeric" });
+    }
+
+    function renderChart(rows) {
+      chartRows = rows;
+      const box = document.getElementById("chart-box");
+      const svg = document.getElementById("chart");
+      const tip = document.getElementById("chart-tip");
+      const W = box.clientWidth, H = box.clientHeight;
+      if (!rows.length || W === 0 || H === 0) { svg.innerHTML = ""; return; }
+
+      const pts = rows.map(r => ({
+        t: new Date(r.date + "T00:00:00").getTime(),
+        date: r.date,
+        v: CHART_SERIES.map(s => r[s.key]),
+      }));
+      const values = pts.flatMap(p => p.v);
+      const yTicks = niceTicks(Math.min(...values), Math.max(...values), 5);
+      const yMin = yTicks[0], yMax = yTicks[yTicks.length - 1];
+      const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+
+      const m = { l: 48, r: 104, t: 8, b: 26 };
+      const iw = W - m.l - m.r, ih = H - m.t - m.b;
+      const x = t => m.l + (t1 === t0 ? iw / 2 : (t - t0) / (t1 - t0) * iw);
+      const y = v => m.t + (yMax === yMin ? ih / 2 : (yMax - v) / (yMax - yMin) * ih);
+
+      let out = "";
+      // Recessive grid + y labels
+      for (const v of yTicks) {
+        out += `<line x1="${m.l}" x2="${m.l + iw}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)" stroke-width="1"/>`;
+        out += `<text x="${m.l - 8}" y="${y(v) + 4}" text-anchor="end">${v.toFixed(v % 1 ? 1 : 0)}</text>`;
+      }
+      // Baseline + x labels
+      out += `<line x1="${m.l}" x2="${m.l + iw}" y1="${m.t + ih}" y2="${m.t + ih}" stroke="var(--axis)" stroke-width="1"/>`;
+      const nX = Math.max(2, Math.min(6, Math.floor(iw / 110)));
+      const spanDays = (t1 - t0) / 864e5;
+      for (let i = 0; i < nX; i++) {
+        const t = t0 + (t1 - t0) * i / (nX - 1);
+        const anchor = i === 0 ? "start" : i === nX - 1 ? "end" : "middle";
+        out += `<text x="${x(t)}" y="${H - 6}" text-anchor="${anchor}">${fmtDate(new Date(t), spanDays < 120)}</text>`;
+      }
+      // Lines
+      CHART_SERIES.forEach((s, si) => {
+        const d = pts.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v[si]).toFixed(1)}`).join("");
+        out += `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`;
+      });
+      // Direct end labels, nudged apart when the lines end close together
+      const last = pts[pts.length - 1];
+      const ends = CHART_SERIES.map((s, si) => ({ s, v: last.v[si], ly: y(last.v[si]) }))
+        .sort((a, b) => a.ly - b.ly);
+      for (let i = 1; i < ends.length; i++) {
+        if (ends[i].ly - ends[i - 1].ly < 14) ends[i].ly = ends[i - 1].ly + 14;
+      }
+      for (const e of ends) {
+        out += `<circle cx="${x(last.t)}" cy="${y(e.v)}" r="4" fill="${e.s.color}" stroke="var(--chart-surface)" stroke-width="2"/>`;
+        out += `<text x="${x(last.t) + 10}" y="${e.ly + 4}" style="fill:#cbd5e1">${e.s.name.split(" ")[0]} ${e.v.toFixed(2)}</text>`;
+      }
+      // Hover layer
+      out += `<g id="hover" style="display:none">
+        <line id="hover-line" y1="${m.t}" y2="${m.t + ih}" stroke="#64748b" stroke-width="1"/>
+        ${CHART_SERIES.map((s, si) => `<circle id="hover-dot-${si}" r="4" fill="${s.color}" stroke="var(--chart-surface)" stroke-width="2"/>`).join("")}
+      </g>
+      <rect id="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/>`;
+
+      svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+      svg.innerHTML = out;
+
+      const hover = svg.getElementById("hover");
+      const hit = svg.getElementById("hit");
+      hit.addEventListener("pointermove", ev => {
+        const rect = svg.getBoundingClientRect();
+        const px = ev.clientX - rect.left;
+        const t = t0 + (px - m.l) / iw * (t1 - t0);
+        let lo = 0, hi = pts.length - 1;
+        while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (pts[mid].t < t) lo = mid; else hi = mid; }
+        const p = Math.abs(pts[lo].t - t) <= Math.abs(pts[hi].t - t) ? pts[lo] : pts[hi];
+        const cx = x(p.t);
+        hover.style.display = "";
+        svg.getElementById("hover-line").setAttribute("x1", cx);
+        svg.getElementById("hover-line").setAttribute("x2", cx);
+        CHART_SERIES.forEach((s, si) => {
+          const dot = svg.getElementById(`hover-dot-${si}`);
+          dot.setAttribute("cx", cx);
+          dot.setAttribute("cy", y(p.v[si]));
+        });
+        tip.innerHTML = `<div class="tip-date">${fmtDate(new Date(p.t), true)}</div>` +
+          CHART_SERIES.map((s, si) =>
+            `<div class="tip-row"><svg width="14" height="8" aria-hidden="true"><line x1="1" y1="4" x2="13" y2="4" stroke="${s.color}" stroke-width="2"${s.dash ? ' stroke-dasharray="4 3"' : ""}/></svg>${s.name}<span class="tip-val">${p.v[si].toFixed(2)}</span></div>`
+          ).join("");
+        tip.style.display = "block";
+        const tw = tip.offsetWidth;
+        tip.style.left = `${cx + 12 + tw > W ? cx - 12 - tw : cx + 12}px`;
+        tip.style.top = `${m.t + 4}px`;
+      });
+      hit.addEventListener("pointerleave", () => {
+        hover.style.display = "none";
+        tip.style.display = "none";
+      });
+    }
+
+    window.addEventListener("resize", () => { if (chartRows) renderChart(chartRows); });
 
     function showError(msg) {
       const el = document.getElementById("error-banner");
@@ -298,7 +517,7 @@
 
       hideError();
       document.getElementById("summary-row").style.display = "none";
-      document.getElementById("table-wrap").style.display = "none";
+      document.getElementById("results").style.display = "none";
       document.getElementById("calc-btn").disabled = true;
       document.getElementById("spinner").style.display = "block";
 
@@ -318,6 +537,8 @@
 
         renderSummary(data.summary);
         renderTable(data.columns, data.rows);
+        document.getElementById("results").style.display = "flex";
+        renderChart(data.rows);
       } catch (err) {
         showError("Network error: " + err.message);
       } finally {
